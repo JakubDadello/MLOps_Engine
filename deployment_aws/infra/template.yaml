@@ -73,7 +73,7 @@ Resources:
       Policies:
         - PolicyName: GlueJobS3Access
           PolicyDocument:
-            Version:
+            Version: "2012-10-17"
             Statement:
               - Effect: Allow
                 Action:  #get access to S3
@@ -102,16 +102,15 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
       
-      # IAM Permissions for Glue
+      # IAM Permissions for Glue Crawler
       Policies:
         - PolicyName: GlueCrawlerS3Access
           PolicyDocument:
-            Version:
+            Version: "2012-10-17"
             Statement:
               - Effect: Allow
                 Action:  
                   - s3:GetObject
-                  - s3:PutObject
                   - s3:ListBucket
                 Resource:
                   - arn:aws:s3:::attempt-bucket-mlops-engine
@@ -124,22 +123,12 @@ Resources:
     Type: AWS::Athena::WorkGroup
     Properties: 
       Description: Workgroup for SQL transformations
-      Name: Athea_SQL_Engine-WorkGroup
+      Name: Athena_SQL_Engine-WorkGroup
       State: ENABLED 
       WorkGroupConfiguration:
         EnforceWorkGroupConfiguration: true 
         ResultConfiguration:
-          OutputLocation: s3://attempt-bucket-mlops-engine/data/
-
-
-  # ============================================================
-  # ATHENA NAMED QUERY 
-  # ============================================================
-  AthenaNamedQuery:
-    Type: AWS::Athena::NamedQuery
-
-
-
+          OutputLocation: "s3://attempt-bucket-mlops-engine/athena-results/"
 
   # ============================================================
   # GlUE JOBS
@@ -151,7 +140,7 @@ Resources:
       Command: 
         Name: glueetl 
         PythonVersion: "3"
-        ScriptLocation: s3://attempt-bucket-mlops-engine/scripts/preprocessing.py 
+        ScriptLocation: "s3://attempt-bucket-mlops-engine/scripts/preprocessing.py"
       Role: !GetAtt GlueJobRole.Arn
       GlueVersion: "4.0"
       WorkerType: G.1X
@@ -164,8 +153,61 @@ Resources:
     Type: AWS::Glue::Crawler
     Properties:
       Name: ETL_Crawler
-      Role: !GetAtt GlueJobRole.Arn
-      DatabaseName: mlops_engine database
+      Role: !GetAtt GlueCrawlerRole.Arn
+      DatabaseName: mlops_engine_database
       Targets:
         S3Targets:
           - Path: s3://attempt-bucket-mlops-engine/data/
+
+  # ============================================================
+  # ATHENA NAMED QUERY 
+  # ============================================================
+  AthenaNamedQuery:
+    Type: AWS::Athena::NamedQuery
+    Properties: 
+      Database: mlops_engine_database
+      QueryString:  
+        "WITH sector_medians AS (
+          SELECT 
+            sector,
+            cumulation,
+            PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY net_income) AS med_net_income,
+            PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY net_cash_flow) AS med_net_cash_flow,
+            PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY roe) AS med_roe,
+            PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY roa) AS med_roa,
+            PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY ebitda) AS med_ebitda
+          FROM raw_data
+          GROUP BY sector, cumulation
+          ),
+
+          scores AS (
+            SELECT
+              d.id,
+              d.sector,
+              d.cumulation,
+                (CASE WHEN d.net_income    > s.med_net_income    THEN 1 ELSE 0 END) +
+                (CASE WHEN d.net_cash_flow > s.med_net_cash_flow THEN 1 ELSE 0 END) +
+                (CASE WHEN d.roe           > s.med_roe           THEN 1 ELSE 0 END) +
+                (CASE WHEN d.roa           > s.med_roa           THEN 1 ELSE 0 END) +
+                (CASE WHEN d.ebitda        > s.med_ebitda        THEN 1 ELSE 0 END) AS score
+              FROM raw_data d
+              JOIN sector_medians s 
+              ON d.sector = s.sector 
+              AND d.cumulation = s.cumulation
+            )
+
+          CREATE TABLE initial_labeling_data 
+          WITH (
+            format = 'PARQUET',
+            external_location = 's3://attempt-bucket-mlops-engine/ETL/initial_labeling_data/'
+          ) AS 
+          SELECT 
+            r.*,
+            CASE 
+              WHEN s.score <= 1 THEN 'low' 
+              WHEN s.score <= 3 THEN 'medium' 
+              ELSE 'high' 
+            END AS investment_rating
+          FROM raw_data r
+          LEFT JOIN scores s 
+          ON r.id = s.id; "
