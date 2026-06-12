@@ -8,32 +8,164 @@ Resources:
   # ============================================================
   # IAM ROLE & PERMISSIONS
   # ============================================================
-  AthenaRole:
+
+  # IAM Role for Lambda
+  LambdaAthenaRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: AthenaS3AccessRole
-      AssumeRolePolicyDocument: 
+      RoleName: LambdaAthenaExecutionRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+
+      # IAM Permissions for Lambda
+      Policies:
+        - PolicyName: AthenaExecutionPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+
+            # Athena API
+            - Effect: Allow
+              Action: 
+                - athena:StartQueryExecution
+                - athena:GetQueryExecution
+                - athena:GetQueryResults
+              Resource: "*"
+
+            # S3 API
+            - Effect: Allow
+              Action: 
+                - s3:GetObject
+                - s3:ListBucket
+              Resource:
+                - arn:aws:s3:::attempt-bucket-mlops-engine/*
+
+  # IAM Role for Glue Job 
+  GlueJobRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: GlueJobRole 
+      AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement: 
           - Effect: Allow 
-            Principal: 
+            Principal:
               Service:
-                - athena.amazonaws.com
                 - glue.amazonaws.com
-            Action:
+            Action: 
               - sts:AssumeRole
+      
       ManagedPolicyArns:
-
-        - arn:aws:iam::aws:policy/AmazonAthenaFullAccess
-        - arn:aws:iam::aws:policy/AWSGlueConsoleFullAccess
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      
+      # IAM Permissions for Glue
       Policies:
-        - PolicyName: AthenaS3AccessLimited
+        - PolicyName: GlueJobS3Access
           PolicyDocument:
-            Version: "2012-10-17"
-            Statement: 
+            Version:
+            Statement:
               - Effect: Allow
-                Action:
-                  - GetObject
-                  - PutObject
-                  - ListBucket
-                Resources: arn:aws:s3:::attempt-bucket-mlops-engine
+                Action:  #get access to S3
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                Resource:
+                  - arn:aws:s3:::attempt-bucket-mlops-engine
+                  - arn:aws:s3:::attempt-bucket-mlops-engine/* 
+  
+  # IAM Role for Glue Crawler
+  GlueCrawlerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: GlueCrawlerRole 
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement: 
+          - Effect: Allow 
+            Principal:
+              Service:
+                - glue.amazonaws.com
+            Action: 
+              - sts:AssumeRole
+      
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      
+      # IAM Permissions for Glue
+      Policies:
+        - PolicyName: GlueCrawlerS3Access
+          PolicyDocument:
+            Version:
+            Statement:
+              - Effect: Allow
+                Action:  
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                Resource:
+                  - arn:aws:s3:::attempt-bucket-mlops-engine
+                  - arn:aws:s3:::attempt-bucket-mlops-engine/* 
+              
+  # ============================================================
+  # ATHENA WORK GROUP 
+  # ============================================================
+  AthenaWorkGroup:
+    Type: AWS::Athena::WorkGroup
+    Properties: 
+      Description: Workgroup for SQL transformations
+      Name: Athea_SQL_Engine-WorkGroup
+      State: ENABLED 
+      WorkGroupConfiguration:
+        EnforceWorkGroupConfiguration: true 
+        ResultConfiguration:
+          OutputLocation: s3://attempt-bucket-mlops-engine/data/
+
+
+  # ============================================================
+  # ATHENA NAMED QUERY 
+  # ============================================================
+  AthenaNamedQuery:
+    Type: AWS::Athena::NamedQuery
+
+
+
+
+  # ============================================================
+  # GlUE JOBS
+  # ============================================================
+  GlueJobs:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: ETL_Tool
+      Command: 
+        Name: glueetl 
+        PythonVersion: "3"
+        ScriptLocation: s3://attempt-bucket-mlops-engine/scripts/preprocessing.py 
+      Role: !GetAtt GlueJobRole.Arn
+      GlueVersion: "4.0"
+      WorkerType: G.1X
+      NumberOfWorkers: 2
+
+  # ============================================================
+  # GlUE CRAWLER
+  # ============================================================            
+  GlueCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: ETL_Crawler
+      Role: !GetAtt GlueJobRole.Arn
+      DatabaseName: mlops_engine database
+      Targets:
+        S3Targets:
+          - Path: s3://attempt-bucket-mlops-engine/data/
